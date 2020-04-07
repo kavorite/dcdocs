@@ -7,8 +7,10 @@ import (
 	"github.com/pkg/browser"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	dgo "github.com/bwmarrin/discordgo"
@@ -24,6 +26,7 @@ const (
 	OpResolveUser    Op = "user.resolve"
 	OpParseTimespan  Op = "timespan.parse"
 	OpOpenURI        Op = "uri.open"
+	OpFetchFiles     Op = "channel.fetch"
 )
 
 type Error struct {
@@ -35,6 +38,12 @@ func (err Error) Error() string {
 	return fmt.Sprintf("%s: %s", err.Op, err.Cause)
 }
 
+func (err Error) Warn() {
+	if err.Cause != nil {
+		fmt.Fprintf(os.Stderr, "warn: %s\n", err)
+	}
+}
+
 func (err Error) FCk() {
 	if err.Cause != nil {
 		panic(fmt.Errorf("fatal: %s", err))
@@ -44,6 +53,7 @@ func (err Error) FCk() {
 var (
 	token, tag      string
 	lookbehind      string
+	outputDirectory string
 	targetSnowflake uint64
 	targetDM        string
 	printOnly       bool
@@ -88,6 +98,9 @@ func timespan(src string) (span time.Duration, err error) {
 }
 
 func main() {
+	workerSemaphore := make(chan struct{}, 32)
+	workerSync := sync.WaitGroup{}
+	defer workerSync.Wait()
 	flag.StringVar(&token, "T", "", "Discord authentication token")
 	flag.BoolVar(&printOnly, "p", false, "[p]rint-only")
 	flag.StringVar(&targetDM, "g", "", "Target DM name")
@@ -95,12 +108,14 @@ func main() {
 	flag.StringVar(&lookbehind, "d", "1d",
 		"how much history to grab in units of "+
 			"[s]econds, [m]inutes, [h]ours, and [d]ays (e.g.: 1h30m)")
+	flag.StringVar(&outputDirectory, "o", "", "Output directory to download attachments, if provided")
 	flag.Parse()
 	targetDM = strings.Trim(targetDM, `"'`)
+	outputDirectory = strings.Trim(outputDirectory, `"'`)
+	token = strings.Trim(token, `"'`)
 	if token == "" {
 		token = os.Getenv("DCDOC_TOKEN")
 	}
-	token = strings.Trim(token, `"'`)
 	if token == "" {
 		Error{OpLogin, fmt.Errorf("Missing authentication token; please provide one of DCDOC_TOKEN or -T")}.FCk()
 	}
@@ -164,10 +179,33 @@ func main() {
 	}
 	after := fmt.Sprintf("%d", snowflake.T(0).Stamp(time.Now().Add(-maxAge)))
 	before := "00000000000000000000"
+	if outputDirectory != "" {
+		err := os.Mkdir(outputDirectory, 0700)
+		Error{OpFetchFiles, err}.FCk()
+	}
 	forEach := func(msg *dgo.Message) {
+		defer workerSync.Done()
+		workerSemaphore <- struct{}{}
+		defer func() {
+			<-workerSemaphore
+		}()
 		for _, doc := range msg.Attachments {
 			if printOnly {
 				fmt.Println(doc.URL)
+			} else if outputDirectory != "" {
+				opath := fmt.Sprintf("%s/%s", outputDirectory, doc.Filename)
+				ostrm, err := os.Create(opath)
+				Error{OpFetchFiles, err}.Warn()
+				if err != nil {
+					return
+				}
+				rsp, err := http.Get(doc.URL)
+				Error{OpFetchFiles, err}.Warn()
+				if err != nil {
+					return
+				}
+				_, err = io.Copy(ostrm, rsp.Body)
+				Error{OpFetchFiles, err}.Warn()
 			} else {
 				err := browser.OpenURL(doc.URL)
 				Error{OpOpenURI, err}.FCk()
@@ -177,7 +215,8 @@ func main() {
 	msgs, err := client.ChannelMessages(target.ID, 1, "", "", "")
 	Error{OpHydrateChannel, err}.FCk()
 	if len(msgs) > 0 {
-		forEach(msgs[0])
+		workerSync.Add(1)
+		go forEach(msgs[0])
 	}
 	for {
 		msgs, err := client.ChannelMessages(target.ID, 100, before, after, "")
@@ -185,7 +224,8 @@ func main() {
 		if len(msgs) > 0 {
 			after = msgs[0].ID
 			for i := len(msgs) - 1; i > 0; i-- {
-				forEach(msgs[i])
+				workerSync.Add(1)
+				go forEach(msgs[i])
 			}
 		} else {
 			return
