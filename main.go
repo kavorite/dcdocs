@@ -51,11 +51,11 @@ func (err Error) FCk() {
 }
 
 var (
-	token, tag      string
+	token           string
 	lookbehind      string
+	targetDM        string
 	outputDirectory string
 	targetSnowflake uint64
-	targetDM        string
 	printOnly       bool
 )
 
@@ -205,6 +205,10 @@ func main() {
 					return
 				}
 				_, err = io.Copy(ostrm, rsp.Body)
+				Error{OpFetchFiles, err}.Warn()
+				msgid, err := snowflake.Parse(msg.ID)
+				Error{OpFetchFiles, err}.Warn()
+				err = os.Chtimes(opath, msgid.Time(), msgid.Time())
 				Error{OpFetchFiles, err}.Warn()
 			} else {
 				err := browser.OpenURL(doc.URL)
