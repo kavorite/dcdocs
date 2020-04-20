@@ -156,9 +156,12 @@ func main() {
 		target, err = client.Channel(fmt.Sprintf("%d", targetSnowflake))
 		// if 404, try resolving this snowflake against a one-to-one DM channel
 		// instead
-		msg := err.Error()
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		}
 		pfx := "HTTP 404 Not Found"
-		if pfx == msg[:len(pfx)] {
+		if len(msg) >= len(pfx) && pfx == msg[:len(pfx)] {
 			if len(dms) == 0 {
 				dms, err = client.UserChannels()
 				Error{OpResolveChannel, err}.FCk()
@@ -208,6 +211,7 @@ func main() {
 				Error{OpFetchFiles, err}.Warn()
 				msgid, err := snowflake.Parse(msg.ID)
 				Error{OpFetchFiles, err}.Warn()
+				fmt.Println(msgid.Time())
 				err = os.Chtimes(opath, msgid.Time(), msgid.Time())
 				Error{OpFetchFiles, err}.Warn()
 			} else {
